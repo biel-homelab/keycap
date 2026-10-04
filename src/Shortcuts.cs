@@ -13,6 +13,7 @@ namespace Keycap
             new string[] { "Cmd+Left / Right",      "line start / end" },
             new string[] { "Cmd+Up / Down",         "document start / end" },
             new string[] { "Cmd+Shift+arrows",      "select to that point" },
+            new string[] { "Cmd+Shift/Opt+arrows",  "Forge Deck: move / focus a grid cell" },
             new string[] { "Cmd+Delete",            "forward delete" },
             new string[] { "Cmd+Q",                 "quit app" },
             new string[] { "Cmd+M",                 "minimise window" },

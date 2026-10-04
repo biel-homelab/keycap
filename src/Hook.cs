@@ -89,6 +89,17 @@ namespace Keycap
         static extern uint MapVirtualKey(uint code, uint mapType);
         [DllImport("user32.dll")]
         static extern short GetAsyncKeyState(int vk);
+        [DllImport("user32.dll")]
+        static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+        [DllImport("kernel32.dll")]
+        static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        static extern bool QueryFullProcessImageName(IntPtr process, int flags,
+                                                     System.Text.StringBuilder name, ref int size);
+        [DllImport("kernel32.dll")]
+        static extern bool CloseHandle(IntPtr handle);
 
         // ---- virtual keys we care about -------------------------------------
         const int VK_LWIN = 0x5B, VK_RWIN = 0x5C;
@@ -466,6 +477,36 @@ namespace Keycap
             get { return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0; }
         }
 
+        // ---- apps that read Command+arrow chords as Ctrl chords -------------
+        // Forge Deck moves a grid cell on Ctrl+Shift+arrow and the grid's focus
+        // on Ctrl+Alt+arrow: Command+Shift and Command+Option with an arrow,
+        // typed the Mac way. Everywhere else those select to the line's or the
+        // document's ends; in Forge Deck they reach the app as Ctrl chords.
+        // The installed app is "Forge Deck.exe"; a dev build runs Electron from
+        // inside a forge-deck checkout.
+        const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+        static bool ForgeDeckInFront()
+        {
+            uint pid;
+            GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+            if (pid == 0) return false;
+            IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (h == IntPtr.Zero) return false;
+            try
+            {
+                System.Text.StringBuilder sb = new System.Text.StringBuilder(1024);
+                int size = sb.Capacity;
+                if (!QueryFullProcessImageName(h, 0, sb, ref size)) return false;
+                string path = sb.ToString(0, size);
+                string file = System.IO.Path.GetFileName(path);
+                if (string.Equals(file, "Forge Deck.exe", StringComparison.OrdinalIgnoreCase)) return true;
+                return string.Equals(file, "electron.exe", StringComparison.OrdinalIgnoreCase)
+                    && path.IndexOf("\\forge-deck", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            finally { CloseHandle(h); }
+        }
+
         // ---- the hook -------------------------------------------------------
 
         static IntPtr Callback(int code, IntPtr wParam, IntPtr lParam)
@@ -701,6 +742,12 @@ namespace Keycap
             // ---- Command shortcuts ------------------------------------------
             if (_cmdDown)
             {
+                // Forge Deck's grid keys (ForgeDeckInFront): the arrow goes
+                // through untouched, under the Ctrl that Command holds down and
+                // the Shift, or the Alt that Option holds down.
+                if ((vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN)
+                    && (Shift || _altHeld) && ForgeDeckInFront())
+                    return false;
                 switch (vk)
                 {
                     case VK_LEFT: Bare(delegate { Tap(VK_HOME); }); return true;

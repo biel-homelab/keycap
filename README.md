@@ -65,6 +65,7 @@ releases every modifier and turns remapping off.
 | `⌘C` `⌘V` `⌘X` `⌘A` `⌘Z` | Copy, paste, cut, select all, undo |
 | `⌘←` `⌘→` | Line start / end |
 | `⌘↑` `⌘↓` | Document start / end |
+| `⌘⇧` / `⌘⌥` + arrows in Forge Deck | Reach the app as `Ctrl+Shift` / `Ctrl+Alt` + arrows: move / focus a grid cell |
 | `⌘⌫` | Forward delete (the `Del` key) |
 | `⌘Q` / `⌘M` / `⌘Space` | Quit app / minimise / Search |
 | `⌥←` `⌥→` | Jump word by word — add `⇧` to select |
