@@ -55,7 +55,8 @@ on startup, and installs one on a click — it downloads, hands over to a small
 script, and restarts itself on the new version.
 
 If the keyboard ever feels stuck, press **both Shift keys together**: that
-releases every modifier and turns remapping off.
+releases every key that is held down, Keycap's or any other program's, and
+turns remapping off.
 
 ## Usage
 
@@ -147,6 +148,11 @@ This cannot be checked against the hardware: the modifiers are *swallowed*, so
 Windows never records them and `GetAsyncKeyState` reports them as up even while
 held. Recovery is by idle time instead — hold something with no key for a few
 seconds and it lets go — plus both Shift keys as a manual release.
+
+A remapped key's release always undoes exactly what its press sent, even if the
+layout or a rule changed in between. And starting Keycap lets go of any key
+Windows still thinks is held, such as one left down by a Keycap that was closed
+mid-press.
 
 ### Microphone
 
