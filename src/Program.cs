@@ -49,6 +49,9 @@ namespace Keycap
             }
             catch (Exception ex)
             {
+                // A crash must not leave a key held down - the message box
+                // below waits for a click.
+                try { Hook.Stop(); } catch { }
                 LogError(ex);
                 MessageBox.Show(ex.ToString(), "Keycap");
             }

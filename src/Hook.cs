@@ -105,6 +105,7 @@ namespace Keycap
         const int VK_LWIN = 0x5B, VK_RWIN = 0x5C;
         const int VK_LMENU = 0xA4, VK_RMENU = 0xA5;
         const int VK_LCONTROL = 0xA2, VK_CONTROL = 0x11;
+        const int VK_MENU = 0x12;
         const int VK_LSHIFT = 0xA0, VK_SHIFT = 0x10;
         const int VK_LEFT = 0x25, VK_UP = 0x26, VK_RIGHT = 0x27, VK_DOWN = 0x28;
         const int VK_HOME = 0x24, VK_END = 0x23;
@@ -120,10 +121,12 @@ namespace Keycap
         // ---- state ----------------------------------------------------------
         static IntPtr _hook = IntPtr.Zero;
         static HookProc _proc;          // kept alive; a collected delegate crashes the hook
-        static bool _cmdDown;           // physical Command  (reports as LWin)
+        // _cmdDown and _winHeld are also read by the injection thread (see Bare),
+        // so they are volatile and always set before the key they stand for is sent.
+        static volatile bool _cmdDown;  // physical Command  (reports as LWin)
         static bool _optDown;           // physical Option   (reports as LAlt)
         static bool _altTabbing;        // Option+Tab switcher is open
-        static bool _winHeld;           // we are holding Win on Option's behalf
+        static volatile bool _winHeld;  // we are holding Win on Option's behalf
         static bool _altHeld;           // we are holding Alt on Option's behalf
         static bool _optUsed;           // a key was pressed while Option was held
 
@@ -135,6 +138,10 @@ namespace Keycap
         public static void Start()
         {
             if (_hook != IntPtr.Zero) return;
+            // Starting is the moment to clear anything left down - by a previous
+            // Keycap killed mid-press, say, or a key held while Keycap was off
+            // whose up the hook would now handle differently.
+            ReleaseHeld();
             StartWorker();
             _proc = Callback;
             _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc,
@@ -257,7 +264,7 @@ namespace Keycap
         static void CheckAlive()
         {
             if (_hook == IntPtr.Zero) return;
-            if (_cmdDown || _optDown || _winHeld || _altHeld || _altTabbing) return;  // mid-chord
+            if (_cmdDown || _optDown || _winHeld || _altHeld || _altTabbing || _pressed.Count > 0) return;  // mid-chord
             if (unchecked(Environment.TickCount - _rearmed) < 3000) return;
 
             LASTINPUTINFO li = new LASTINPUTINFO();
@@ -273,11 +280,12 @@ namespace Keycap
             Rearm();
         }
 
-        /// <summary>Let go of everything and stop remapping.</summary>
+        /// <summary>Let go of every held key - ours or anyone's - and stop
+        /// remapping.</summary>
         public static void Panic()
         {
-            ReleaseAll();
             Stop();
+            ReleaseHeld();
             Osd.Show("Remapping off - both Shifts pressed", Osd.Sym.MicOff, Theme.Warn);
         }
 
@@ -285,11 +293,39 @@ namespace Keycap
         public static void ReleaseAll()
         {
             if (_altTabbing) { Key(VK_LMENU, false); _altTabbing = false; }
-            if (_winHeld) { Key(VK_LWIN, false); _winHeld = false; }
+            if (_winHeld) { _winHeld = false; Key(VK_LWIN, false); }
             if (_altHeld) { Key(VK_LMENU, false); _altHeld = false; }
-            if (_cmdDown) { Key(VK_LCONTROL, false); _cmdDown = false; }
+            if (_cmdDown) { _cmdDown = false; Key(VK_LCONTROL, false); }
             _optDown = false;
             _optUsed = false;
+
+            // Remapped keys too: their ups would otherwise never be sent.
+            foreach (int to in _pressed.Values)
+                if (to != TEXT) Scan(to, false);
+            _pressed.Clear();
+        }
+
+        /// <summary>
+        /// Let go of every key Windows reports down, whoever pressed it.
+        ///
+        /// What we track is not the whole story. A key-down injected by another
+        /// program, or by a Keycap that was killed mid-press, stays down with no
+        /// key-up ever coming, and the keyboard looks dead. Mouse buttons are
+        /// left alone.
+        /// </summary>
+        static void ReleaseHeld()
+        {
+            List<int> held = new List<int>();
+            for (int vk = VK_BACK; vk <= 0xFE; vk++)
+            {
+                if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) continue;   // also report through their left/right keys, which get released
+                if (Down(vk)) held.Add(vk);
+            }
+            if (held.Count == 0) return;
+            // A lone Win or Alt release opens Start or the menu bar; a key in
+            // between masks it (as Bare does).
+            if (held.Contains(VK_LWIN) || held.Contains(VK_RWIN) || held.Contains(VK_LMENU) || held.Contains(VK_RMENU)) Tap(VK_MASK);
+            foreach (int vk in held) Key(vk, false);
         }
 
         public static void Stop()
@@ -300,12 +336,8 @@ namespace Keycap
             if (_watchdog != null) _watchdog.Stop();
             UnhookWindowsHookEx(_hook);
             _hook = IntPtr.Zero;
-            // Never leave a modifier stuck down.
-            if (_cmdDown) { Key(VK_LCONTROL, false); _cmdDown = false; }
-            if (_altTabbing) { Key(VK_LMENU, false); _altTabbing = false; }
-            if (_winHeld) { Key(VK_LWIN, false); _winHeld = false; }
-            if (_altHeld) { Key(VK_LMENU, false); _altHeld = false; }
-            _optDown = false;
+            // Never leave a key stuck down.
+            ReleaseAll();
             Raise();
         }
 
@@ -430,8 +462,12 @@ namespace Keycap
                 if (cmd) Key(VK_LCONTROL, false);
                 if (win) Key(VK_LWIN, false);
                 act();
-                if (win) Key(VK_LWIN, true);
-                if (cmd) Key(VK_LCONTROL, true);
+                // Put back only what is still held: a Command or Option let go
+                // while this sat in the queue has already sent its key-up.
+                // Checked again after the restore, for a release that lands in
+                // between.
+                if (win && _winHeld) { Key(VK_LWIN, true); if (!_winHeld) Key(VK_LWIN, false); }
+                if (cmd && _cmdDown) { Key(VK_LCONTROL, true); if (!_cmdDown) Key(VK_LCONTROL, false); }
             });
         }
 
@@ -602,7 +638,7 @@ namespace Keycap
         /// </summary>
         static void Reconcile()
         {
-            if (!_cmdDown && !_optDown && !_winHeld && !_altHeld && !_altTabbing) return;
+            if (!_cmdDown && !_optDown && !_winHeld && !_altHeld && !_altTabbing && _pressed.Count == 0) return;
             if (unchecked(Environment.TickCount - _lastEvent) < 4000) return;
             ReleaseAll();
         }
@@ -670,8 +706,8 @@ namespace Keycap
                     }
                     else if (_winHeld)
                     {
-                        Key(VK_LWIN, false);
                         _winHeld = false;
+                        Key(VK_LWIN, false);
                     }
                     else if (!_optUsed)
                     {
@@ -690,10 +726,15 @@ namespace Keycap
 
             if (!down) return ScanRemap(k, false);
 
+            // A remapped key held while Command or Option goes down keeps
+            // repeating as what its press started. Otherwise the repeat goes
+            // through as the physical key, and its up is then swallowed.
+            if (_pressed.ContainsKey(sc)) return ScanRemap(k, true);
+
             // ---- panic release ------------------------------------------------
-            // Holding both Shift keys drops everything we are holding and turns
-            // remapping off, so a wedged keyboard is always recoverable from the
-            // keyboard itself.
+            // Holding both Shift keys releases every held key, ours or anyone's,
+            // and turns remapping off, so a wedged keyboard is always recoverable
+            // from the keyboard itself.
             if (down && (vk == VK_LSHIFT || vk == 0xA1) && Down(VK_LSHIFT) && Down(0xA1))
             {
                 Panic();
@@ -775,7 +816,7 @@ namespace Keycap
                 {
                     if (!_altTabbing)
                     {
-                        if (_winHeld) { Key(VK_LWIN, false); _winHeld = false; }
+                        if (_winHeld) { _winHeld = false; Key(VK_LWIN, false); }
                         Key(VK_LMENU, true);
                         _altTabbing = true;
                     }
@@ -802,7 +843,7 @@ namespace Keycap
                 {
                     if (!_altHeld) { Key(VK_LMENU, true); _altHeld = true; }
                 }
-                else if (!_winHeld) { Key(VK_LWIN, true); _winHeld = true; }
+                else if (!_winHeld) { _winHeld = true; Key(VK_LWIN, true); }
                 return false;
             }
 
@@ -834,19 +875,54 @@ namespace Keycap
 
         // ---- per-layout scancode fixes --------------------------------------
 
+        // What each remapped key's down sent, by physical scancode. Its up lets
+        // go of exactly that, not of whatever the layout and the rules say by
+        // the time the key comes up.
+        static readonly Dictionary<int, int> _pressed = new Dictionary<int, int>();
+        const int TEXT = -1;            // a text rule typed its text; the up has nothing to release
+
         static bool ScanRemap(KBDLLHOOKSTRUCT k, bool down)
         {
-            string sc = ((int)k.scanCode).ToString("X3");
-            Mapping.Rule r = Mapping.FindScan(sc, InputLang.CurrentLangId());
+            int phys = (int)k.scanCode;
+            int to;
+            Mapping.Rule r;
+
+            if (!down)
+            {
+                // Nothing recorded: the down went through as itself, so the
+                // up does too.
+                if (!_pressed.TryGetValue(phys, out to)) return false;
+                _pressed.Remove(phys);
+                if (to != TEXT) Scan(to, false);
+                return true;
+            }
+
+            if (_pressed.TryGetValue(phys, out to))
+            {
+                // Auto-repeat keeps the output the press started with. Text is
+                // typed again only while the rule still is a text rule.
+                if (to == TEXT)
+                {
+                    r = Mapping.FindScan(phys.ToString("X3"), InputLang.CurrentLangId());
+                    if (r != null && r.Text != null) Text(Shift ? r.ShiftText : r.Text);
+                }
+                else Scan(to, true);
+                return true;
+            }
+
+            r = Mapping.FindScan(phys.ToString("X3"), InputLang.CurrentLangId());
             if (r == null) return false;
 
             if (r.Text != null)
             {
-                if (down) Text(Shift ? r.ShiftText : r.Text);
+                Text(Shift ? r.ShiftText : r.Text);
+                _pressed[phys] = TEXT;
                 return true;
             }
 
-            Scan(Convert.ToInt32(r.To, 16), down);
+            to = Convert.ToInt32(r.To, 16);
+            Scan(to, true);
+            _pressed[phys] = to;
             return true;
         }
     }
